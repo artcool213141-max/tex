@@ -1,0 +1,35 @@
+name: Telegram Autobot 24/7
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    # Запускать каждые 4 часа автоматически, чтобы поддерживать активность
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # Позволяет запускать бота вручную кнопкой в разделе Actions
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Проверка кода
+      uses: actions/checkout@v3
+
+    - name: Установка Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Установка библиотек
+      run: |
+        pip install --upgrade pip
+        pip install telethon supabase requests flask aiogram
+
+    - name: Запуск скрипта
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      run: |
+        python main.py
