@@ -33,7 +33,7 @@ async def cmd_start(update, state: FSMContext):
     await state.clear()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"📁 {table}", callback_data=f"table_{table}_0")]
+            [InlineKeyboardButton(text=f"📁 {table}", callback_data=f"table:{table}:0")]
             for table in TABLES
         ]
     )
@@ -44,18 +44,17 @@ async def cmd_start(update, state: FSMContext):
         await update.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await update.answer()
 
-# --- 2. СПИСОК ЗАПИСЕЙ С ПОСТРАНИЧНОЙ НАВИГАЦИЕЙ (БЕЗ ЛИМИТОВ) ---
-@dp.callback_query(F.data.startswith("table_") & ~F.data.contains("row"))
+# --- 2. СПИСОК ЗАПИСЕЙ С ПОСТРАНИЧНОЙ НАВИГАЦИЕЙ ---
+@dp.callback_query(F.data.startswith("table:"))
 async def show_table_records(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
+    parts = callback.data.split(":")
     table_name = parts[1]
     offset = int(parts[2]) if len(parts) > 2 else 0
-    limit = 10  # Выводим по 10 кнопок на страницу, но листать можно до бесконечности
+    limit = 10
 
     await state.update_data(current_table=table_name)
     
     try:
-        # Пагинация через range без ограничений сверху
         res = supabase.table(table_name).select("*").range(offset, offset + limit - 1).execute()
         rows = res.data
     except Exception as e:
@@ -72,18 +71,18 @@ async def show_table_records(callback: CallbackQuery, state: FSMContext):
     buttons = []
     for r in rows:
         row_id = r.get(id_key, "запись")
-        buttons.append([InlineKeyboardButton(text=f"🆔 {row_id}", callback_data=f"row_{table_name}_{row_id}")])
+        buttons.append([InlineKeyboardButton(text=f"🆔 {row_id}", callback_data=f"row:{table_name}:{row_id}")])
 
     nav_buttons = []
     if offset > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"table_{table_name}_{max(0, offset - limit)}"))
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"table:{table_name}:{max(0, offset - limit)}"))
     if len(rows) == limit:
-        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"table_{table_name}_{offset + limit}"))
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"table:{table_name}:{offset + limit}"))
     
     if nav_buttons:
         buttons.append(nav_buttons)
 
-    buttons.append([InlineKeyboardButton(text="🔍 Глобальный поиск ID", callback_data=f"search_{table_name}")])
+    buttons.append([InlineKeyboardButton(text="🔍 Глобальный поиск ID", callback_data=f"search:{table_name}")])
     buttons.append([InlineKeyboardButton(text="🏠 К списку таблиц", callback_data="back_to_tables")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -94,14 +93,14 @@ async def show_table_records(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # --- 3. ГЛОБАЛЬНЫЙ ПОИСК ПО ВСЕЙ БАЗЕ ---
-@dp.callback_query(F.data.startswith("search_"))
+@dp.callback_query(F.data.startswith("search:"))
 async def ask_search_query(callback: CallbackQuery, state: FSMContext):
-    table_name = callback.data.split("_")[1]
+    table_name = callback.data.split(":")[1]
     await state.set_state(AdminStates.waiting_for_search)
     await state.update_data(current_table=table_name)
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"table_{table_name}_0")]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"table:{table_name}:0")]
     ])
     await callback.message.edit_text(f"🔍 Введи ID или текст для поиска в **{table_name}**:", parse_mode="Markdown", reply_markup=keyboard)
     await callback.answer()
@@ -116,7 +115,6 @@ async def process_search(message: Message, state: FSMContext):
         id_key = "user_id" if table_name == "users" else "id"
         rows = []
         
-        # Сначала пробуем точный поиск по ID (если ввели число)
         try:
             res_exact = supabase.table(table_name).select("*").eq(id_key, int(query_text)).execute()
             if res_exact.data:
@@ -124,13 +122,11 @@ async def process_search(message: Message, state: FSMContext):
         except ValueError:
             pass
 
-        # Если точного совпадения нет, ищем по тексту без жесткого лимита
         if not rows:
             res_all = supabase.table(table_name).select("*").ilike(id_key, f"%{query_text}%").execute()
             if res_all.data:
                 rows = res_all.data
             else:
-                # Общий поиск по строкам, если поле не найдено через ilike
                 res_fallback = supabase.table(table_name).select("*").limit(500).execute()
                 rows = [r for r in res_fallback.data if any(query_text.lower() in str(v).lower() for v in r.values())]
 
@@ -140,7 +136,7 @@ async def process_search(message: Message, state: FSMContext):
 
     if not rows:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}_0")]
+            [InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table:{table_name}:0")]
         ])
         await message.answer(f"Ничего не найдено по запросу: *{query_text}*", parse_mode="Markdown", reply_markup=keyboard)
         await state.clear()
@@ -150,21 +146,21 @@ async def process_search(message: Message, state: FSMContext):
     id_key = "user_id" if "user_id" in first_row else ("id" in first_row and "id" or list(first_row.keys())[0])
 
     buttons = []
-    for r in rows[:30]:  # Показываем до 30 результатов поиска
+    for r in rows[:30]:
         row_id = r.get(id_key, "запись")
-        buttons.append([InlineKeyboardButton(text=f"🔍 Найдено: {row_id}", callback_data=f"row_{table_name}_{row_id}")])
+        buttons.append([InlineKeyboardButton(text=f"🔍 Найдено: {row_id}", callback_data=f"row:{table_name}:{row_id}")])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}_0")])
+    buttons.append([InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table:{table_name}:0")])
 
     await message.answer(f"🔍 Результаты поиска (найдено: {len(rows)}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.clear()
 
 # --- 4. ПРОСМОТР КАРТОЧКИ ЗАПИСИ ---
-@dp.callback_query(F.data.startswith("row_"))
+@dp.callback_query(F.data.startswith("row:"))
 async def show_row_details(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
+    parts = callback.data.split(":")
     table_name = parts[1]
-    row_id = "_".join(parts[2:])
+    row_id = ":".join(parts[2:])
 
     await state.update_data(current_table=table_name, current_row_id=row_id)
     id_key = "user_id" if table_name == "users" else "id"
@@ -196,9 +192,9 @@ async def show_row_details(callback: CallbackQuery, state: FSMContext):
         val_str = str(value)
         if len(val_str) > 20:
             val_str = val_str[:17] + "..."
-        buttons.append([InlineKeyboardButton(text=f"✏️ {field_name}: {val_str}", callback_data=f"edit_{field_name}")])
+        buttons.append([InlineKeyboardButton(text=f"✏️ {field_name}: {val_str}", callback_data=f"edit:{field_name}")])
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"table_{table_name}_0")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"table:{table_name}:0")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(
@@ -209,9 +205,9 @@ async def show_row_details(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # --- 5. РЕДАКТИРОВАНИЕ ПОЛЯ ---
-@dp.callback_query(F.data.startswith("edit_"))
+@dp.callback_query(F.data.startswith("edit:"))
 async def ask_new_field_value(callback: CallbackQuery, state: FSMContext):
-    field_name = callback.data.replace("edit_", "", 1)
+    field_name = callback.data.replace("edit:", "", 1)
     await state.update_data(editing_field=field_name)
     await state.set_state(AdminStates.waiting_for_field_value)
 
@@ -220,7 +216,7 @@ async def ask_new_field_value(callback: CallbackQuery, state: FSMContext):
     row_id = data.get("current_row_id")
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"row_{table_name}_{row_id}")]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"row:{table_name}:{row_id}")]
     ])
     await callback.message.edit_text(
         f"✍️ Введи новое значение для поля **{field_name}**:",
