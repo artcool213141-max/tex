@@ -9,9 +9,9 @@ from aiogram.fsm.state import State, StatesGroup
 from supabase import create_client
 
 # Подтягиваем переменные окружения
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+BOT_TOKEN = os.environ.get("8902977298:AAFXq-RNoSx7qZiUtxwKBPhlkh5La3iQ_fs")
+SUPABASE_URL = os.environ.get("https://xjucalpaoqlrtmofmden.supabase.co")
+SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhqdWNhbHBhb3FscnRtb2ZtZGVuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NjQ0MjM4NywiZXhwIjoyMDkyMDE4Mzg3fQ.CCo4AgdSwWbbUSAL8W1OCbAtTChaL5zSN4Q6Pd_8RN0")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
