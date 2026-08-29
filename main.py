@@ -17,7 +17,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Список твоих таблиц
 TABLES = [
     "users", "promo_codes", "orders", "ambassador_codes", 
     "ambassador_activations", "ambassador_deposits"
@@ -27,14 +26,14 @@ class AdminStates(StatesGroup):
     waiting_for_search = State()
     waiting_for_field_value = State()
 
-# --- 1. ГЛАВНОЕ МЕНЮ (СПИСОК ТАБЛИЦ) ---
+# --- 1. ГЛАВНОЕ МЕНЮ ---
 @dp.message(Command("start"))
 @dp.callback_query(F.data == "back_to_tables")
 async def cmd_start(update, state: FSMContext):
     await state.clear()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"📁 {table}", callback_data=f"table_{table}")]
+            [InlineKeyboardButton(text=f"📁 {table}", callback_data=f"table_{table}_0")]
             for table in TABLES
         ]
     )
@@ -45,47 +44,56 @@ async def cmd_start(update, state: FSMContext):
         await update.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await update.answer()
 
-# --- 2. СПИСОК ЗАПИСЕЙ КНОПКАМИ ПО ВЫБОРУ ТАБЛИЦЫ ---
+# --- 2. СПИСОК ЗАПИСЕЙ С ПОСТРАНИЧНОЙ НАВИГАЦИЕЙ (БЕЗ ЛИМИТОВ) ---
 @dp.callback_query(F.data.startswith("table_") & ~F.data.contains("row"))
 async def show_table_records(callback: CallbackQuery, state: FSMContext):
-    table_name = callback.data.split("_")[1]
+    parts = callback.data.split("_")
+    table_name = parts[1]
+    offset = int(parts[2]) if len(parts) > 2 else 0
+    limit = 10  # Выводим по 10 кнопок на страницу, но листать можно до бесконечности
+
     await state.update_data(current_table=table_name)
     
     try:
-        # Пытаемся взять последние 10 записей
-        res = supabase.table(table_name).select("*").limit(10).execute()
+        # Пагинация через range без ограничений сверху
+        res = supabase.table(table_name).select("*").range(offset, offset + limit - 1).execute()
         rows = res.data
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка запроса: {e}")
         return
 
-    if not rows:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Поиск", callback_data=f"search_{table_name}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_tables")]
-        ])
-        await callback.message.edit_text(f"📂 Таблица: **{table_name}**\n\n*(Пусто)*", parse_mode="Markdown", reply_markup=keyboard)
-        await callback.answer()
+    if not rows and offset > 0:
+        await callback.answer("Это последняя страница", show_alert=True)
         return
 
-    # Определяем ключевое поле для идентификации строки (user_id, id или первое попавшееся)
-    first_row = rows[0]
-    id_key = "user_id" if "user_id" in first_row else ("id" in first_row and "id" or list(first_row.keys())[0])
+    first_row = rows[0] if rows else {}
+    id_key = "user_id" if "user_id" in first_row else ("id" in first_row and "id" or list(first_row.keys())[0] if first_row else "id")
 
     buttons = []
     for r in rows:
         row_id = r.get(id_key, "запись")
         buttons.append([InlineKeyboardButton(text=f"🆔 {row_id}", callback_data=f"row_{table_name}_{row_id}")])
 
-    # Добавляем кнопки поиска и возврата
-    buttons.append([InlineKeyboardButton(text="🔍 Поиск по таблице", callback_data=f"search_{table_name}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад к таблицам", callback_data="back_to_tables")])
+    nav_buttons = []
+    if offset > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"table_{table_name}_{max(0, offset - limit)}"))
+    if len(rows) == limit:
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"table_{table_name}_{offset + limit}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    buttons.append([InlineKeyboardButton(text="🔍 Глобальный поиск ID", callback_data=f"search_{table_name}")])
+    buttons.append([InlineKeyboardButton(text="🏠 К списку таблиц", callback_data="back_to_tables")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(f"📂 Таблица: **{table_name}**\nВыбери запись для просмотра:", parse_mode="Markdown", reply_markup=keyboard)
+    page_num = (offset // limit) + 1
+    text = f"📂 Таблица: **{table_name}** (Страница {page_num})\nВыбери запись:"
+    
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
     await callback.answer()
 
-# --- 3. ПОИСК ПО ТАБЛИЦЕ ---
+# --- 3. ГЛОБАЛЬНЫЙ ПОИСК ПО ВСЕЙ БАЗЕ ---
 @dp.callback_query(F.data.startswith("search_"))
 async def ask_search_query(callback: CallbackQuery, state: FSMContext):
     table_name = callback.data.split("_")[1]
@@ -93,7 +101,7 @@ async def ask_search_query(callback: CallbackQuery, state: FSMContext):
     await state.update_data(current_table=table_name)
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"table_{table_name}")]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"table_{table_name}_0")]
     ])
     await callback.message.edit_text(f"🔍 Введи ID или текст для поиска в **{table_name}**:", parse_mode="Markdown", reply_markup=keyboard)
     await callback.answer()
@@ -105,15 +113,34 @@ async def process_search(message: Message, state: FSMContext):
     query_text = message.text.strip()
 
     try:
-        res = supabase.table(table_name).select("*").limit(15).execute()
-        rows = [r for r in res.data if any(query_text.lower() in str(v).lower() for v in r.values())]
+        id_key = "user_id" if table_name == "users" else "id"
+        rows = []
+        
+        # Сначала пробуем точный поиск по ID (если ввели число)
+        try:
+            res_exact = supabase.table(table_name).select("*").eq(id_key, int(query_text)).execute()
+            if res_exact.data:
+                rows = res_exact.data
+        except ValueError:
+            pass
+
+        # Если точного совпадения нет, ищем по тексту без жесткого лимита
+        if not rows:
+            res_all = supabase.table(table_name).select("*").ilike(id_key, f"%{query_text}%").execute()
+            if res_all.data:
+                rows = res_all.data
+            else:
+                # Общий поиск по строкам, если поле не найдено через ilike
+                res_fallback = supabase.table(table_name).select("*").limit(500).execute()
+                rows = [r for r in res_fallback.data if any(query_text.lower() in str(v).lower() for v in r.values())]
+
     except Exception as e:
         await message.answer(f"❌ Ошибка поиска: {e}")
         return
 
     if not rows:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}")]
+            [InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}_0")]
         ])
         await message.answer(f"Ничего не найдено по запросу: *{query_text}*", parse_mode="Markdown", reply_markup=keyboard)
         await state.clear()
@@ -123,29 +150,26 @@ async def process_search(message: Message, state: FSMContext):
     id_key = "user_id" if "user_id" in first_row else ("id" in first_row and "id" or list(first_row.keys())[0])
 
     buttons = []
-    for r in rows:
+    for r in rows[:30]:  # Показываем до 30 результатов поиска
         row_id = r.get(id_key, "запись")
         buttons.append([InlineKeyboardButton(text=f"🔍 Найдено: {row_id}", callback_data=f"row_{table_name}_{row_id}")])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ К таблице", callback_data=f"table_{table_name}_0")])
 
-    await message.answer(f"🔍 Результаты поиска ({len(rows)}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await message.answer(f"🔍 Результаты поиска (найдено: {len(rows)}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.clear()
 
-# --- 4. ПРОСМОТР КОНКРЕТНОЙ ЗАПИСИ И ЕЕ КОЛОНОК КНОПКАМИ ---
+# --- 4. ПРОСМОТР КАРТОЧКИ ЗАПИСИ ---
 @dp.callback_query(F.data.startswith("row_"))
 async def show_row_details(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
     table_name = parts[1]
-    row_id = "_".join(parts[2:]) # На случай если ID длинный или числовой
+    row_id = "_".join(parts[2:])
 
     await state.update_data(current_table=table_name, current_row_id=row_id)
-
-    # Определяем название первичного ключа
     id_key = "user_id" if table_name == "users" else "id"
     
     try:
-        # Пробуем найти по числовому ID или текстовому
         try:
             real_id = int(row_id)
         except ValueError:
@@ -153,8 +177,7 @@ async def show_row_details(callback: CallbackQuery, state: FSMContext):
 
         res = supabase.table(table_name).select("*").eq(id_key, real_id).execute()
         if not res.data:
-            # Если не нашли по id, попробуем поискать среди первых строк
-            res = supabase.table(table_name).select("*").limit(20).execute()
+            res = supabase.table(table_name).select("*").limit(500).execute()
             row_data = next((r for r in res.data if str(r.get(id_key)) == str(row_id)), None)
         else:
             row_data = res.data[0]
@@ -168,20 +191,18 @@ async def show_row_details(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(row_data=row_data)
 
-    # Создаем кнопки для каждого поля (колоночки)
     buttons = []
     for field_name, value in row_data.items():
-        # Обрезаем длинные значения для красоты на кнопке
         val_str = str(value)
         if len(val_str) > 20:
             val_str = val_str[:17] + "..."
         buttons.append([InlineKeyboardButton(text=f"✏️ {field_name}: {val_str}", callback_data=f"edit_{field_name}")])
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"table_{table_name}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"table_{table_name}_0")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(
-        f"📝 Карточка записи в **{table_name}** (`{id_key}: {row_id}`)\nНажми на поле, чтобы изменить его значение:",
+        f"📝 Карточка записи в **{table_name}** (`{id_key}: {row_id}`)\nНажми на поле для изменения:",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -223,7 +244,6 @@ async def save_new_field_value(message: Message, state: FSMContext):
         except ValueError:
             real_id = row_id
 
-        # Автоматический перевод чисел и булевых значений для корректности типов в базе
         parsed_value = new_value
         if new_value.lower() == "true":
             parsed_value = True
@@ -238,9 +258,7 @@ async def save_new_field_value(message: Message, state: FSMContext):
             except ValueError:
                 pass
 
-        # Обновляем в Supabase
         supabase.table(table_name).update({field_name: parsed_value}).eq(id_key, real_id).execute()
-        
         await message.answer(f"✅ Успешно! Поле `{field_name}` обновлено на `{new_value}`.")
     except Exception as e:
         await message.answer(f"❌ Ошибка обновления в базе: {e}")
